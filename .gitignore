@@ -1,0 +1,28 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Data files
+data/raw/
+data/processed/
+*.labeled
+*.binetflow
+*.biargus
+*.pcap
+*.pcapng
+
+# Logs
+experiments/*.json
+experiments/*.png
+experiments/*.csv
+listener_log.json
+
+# Environment
+.env
+venv/
+env/
+
+# OS files
+.DS_Store
+Thumbs.db
