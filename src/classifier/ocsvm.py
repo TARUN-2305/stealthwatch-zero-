@@ -13,6 +13,25 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '.
 
 from src.entropy.feature_extractor import EntropyFeatureExtractor
 
+def optimized_load_and_group(path):
+    print("Reading CSV...")
+    df = pd.read_csv(path)
+    df.columns = [c.strip() for c in df.columns]
+    df['is_malicious'] = df['Label'].str.contains('Botnet', na=False).astype(int)
+    df['timestamp'] = pd.to_datetime(df['StartTime']).view('int64') // 10**9
+
+    print(f"Processing {len(df)} flows...")
+    # Group by Host and Connection, then collect timestamps into lists
+    grouped = df.sort_values('timestamp').groupby(['SrcAddr', 'DstAddr', 'Dport'])
+
+    # Filter connection groups with enough packets (minimum 20)
+    agg_df = grouped.agg(
+        deltas=('timestamp', lambda x: np.diff(x.values) if len(x) >= 20 else None),
+        label=('is_malicious', 'max')
+    ).dropna()
+
+    return agg_df
+
 class StealthwatchClassifier:
     """
     One-Class SVM trained exclusively on benign traffic.
@@ -81,44 +100,55 @@ class StealthwatchClassifier:
         obj.trained = True
         return obj
 
-def generate_synthetic_features(n_samples=1000, mode='benign'):
-    """Generate synthetic entropy features for training/testing."""
-    extractor = EntropyFeatureExtractor(window=50)
-    features = []
-    
-    for _ in range(n_samples):
-        if mode == 'benign':
-            # Human-like: Poisson process (exponential inter-arrivals)
-            # Use varying scales to mimic different users
-            scale = random.uniform(0.1, 5.0)
-            deltas = np.random.exponential(scale=scale, size=100)
-        elif mode == 'malicious':
-            # C2-like: Fixed interval + jitter
-            interval = random.uniform(10.0, 60.0)
-            jitter = random.uniform(0.0, 0.3)
-            deltas = interval + np.random.uniform(-jitter*interval, jitter*interval, size=100)
-        
-        feat = extractor.compute_features(deltas)
-        if feat is not None:
-            features.append(feat)
-            
-    return np.array(features)
-
-import random
-
 if __name__ == "__main__":
-    print("Generating synthetic training data (Benign)...")
-    X_train = generate_synthetic_features(n_samples=500, mode='benign')
+    data_path = 'data/raw/CTU-13/scenario1.labeled'
     
-    print("Generating synthetic test data...")
-    X_test_benign = generate_synthetic_features(n_samples=100, mode='benign')
-    X_test_malicious = generate_synthetic_features(n_samples=100, mode='malicious')
-    
-    X_test = np.vstack([X_test_benign, X_test_malicious])
-    y_test = np.hstack([np.zeros(len(X_test_benign)), np.ones(len(X_test_malicious))])
-    
+    if os.path.exists(data_path):
+        agg_df = optimized_load_and_group(data_path)
+        extractor = EntropyFeatureExtractor(window=50)
+        benign_feats, malicious_feats = [], []
+
+        print("Extracting entropy features...")
+        for _, row in agg_df.iterrows():
+            deltas = row['deltas']
+            deltas = deltas[deltas > 0]
+            if len(deltas) >= 15:
+                f = extractor.compute_features(deltas)
+                if f is not None:
+                    if row['label'] == 1: malicious_feats.append(f)
+                    else: benign_feats.append(f)
+
+        print(f"Extracted Benign: {len(benign_feats)}, Malicious: {len(malicious_feats)}")
+        X_benign = np.array(benign_feats)
+        split = int(0.8 * len(X_benign))
+        X_train, X_test_benign = X_benign[:split], X_benign[split:]
+        X_test = np.vstack([X_test_benign, malicious_feats])
+        y_test = np.hstack([np.zeros(len(X_test_benign)), np.ones(len(malicious_feats))])
+    else:
+        print(f"Data file {data_path} not found. Running on synthetic data.")
+        def generate_synthetic_features(n_samples=500, mode='benign'):
+            extractor = EntropyFeatureExtractor(window=50)
+            features = []
+            for _ in range(n_samples):
+                if mode == 'benign':
+                    deltas = np.random.exponential(scale=random.uniform(0.1, 5.0), size=100)
+                else:
+                    interval = random.uniform(10.0, 60.0)
+                    jitter = random.uniform(0.0, 0.3)
+                    deltas = interval + np.random.uniform(-jitter*interval, jitter*interval, size=100)
+                feat = extractor.compute_features(deltas)
+                if feat is not None: features.append(feat)
+            return np.array(features)
+        
+        import random
+        X_train = generate_synthetic_features(mode='benign')
+        X_test_benign = generate_synthetic_features(n_samples=100, mode='benign')
+        X_test_malicious = generate_synthetic_features(n_samples=100, mode='malicious')
+        X_test = np.vstack([X_test_benign, X_test_malicious])
+        y_test = np.hstack([np.zeros(len(X_test_benign)), np.ones(len(X_test_malicious))])
+
     clf = StealthwatchClassifier(nu=0.05)
     clf.fit(X_train)
-    clf.evaluate(X_test, y_test, label='Synthetic Test Set')
+    clf.evaluate(X_test, y_test, label='Detection Test Set')
     clf.save()
     print("\nModel saved to experiments/stealthwatch_model.pkl")
