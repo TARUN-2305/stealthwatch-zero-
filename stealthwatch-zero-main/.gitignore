@@ -26,7 +26,3 @@ env/
 # OS files
 .DS_Store
 Thumbs.db
-
-data/raw/
-*.zip
-*.labeled
